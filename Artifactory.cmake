@@ -149,6 +149,15 @@ function(artifactory_add_artifact directory)
             execute_process(
                 COMMAND cmake -E create_symlink ${file} ${binary_directory}/artifact-prebuilt/${file_name})
         endforeach()
+
+        # It's important to note that artifactory_fetch() and
+        # artifactory_add_artifact() don't *force* the underlying build
+        # rule to use a prebuilt artifact. So the word "suggesting" is used
+        # deliberately here -- at this point, we don't want to imply that the
+        # artifact will actually be used, because we can't know for sure.
+        message(STATUS "    - Found prebuilt artifact for ${ARTIFACT_NAME}")
+    else()
+        message(STATUS "    - No prebuilt artifacts found for ${ARTIFACT_NAME}")
     endif()
 
     # The CMakeLists.txt in the subdirectory will hopefully pay attention
@@ -216,11 +225,6 @@ endfunction()
 #
 set_property(GLOBAL PROPERTY _artifactory_fetch_message_printed 0)
 function(artifactory_fetch result_var)
-    # FIXME: please tidy this code up a bit!
-    if(NOT ARTIFACTORY_FETCH)
-        return()
-    endif()
-
     set(one_value_keywords CLASSIFIER EXTENSION GROUP NAME REPO VERSION)
     set(multi_value_keywords PROPERTIES)
     cmake_parse_arguments(ARTIFACT "" "${one_value_keywords}" "${multi_value_keywords}" ${ARGN})
@@ -231,18 +235,18 @@ function(artifactory_fetch result_var)
     default_value(ARTIFACT_EXTENSION *)
     _artifactory_check_version(${ARTIFACT_VERSION})
 
-    if(ARTIFACT_PROPERTIES)
-        _artifactory_parse_properties(props_string "${ARTIFACT_PROPERTIES}")
-        set(extra_args --props=${props_string})
-    else()
-        # We can't set this to an empty string as that expands to "", which is
-        # interpreted as an invalid extra argument by `art`.
-        set(extra_args --props=)
+    if(NOT ARTIFACTORY_FETCH)
+        return()
     endif()
 
-    _artifactory_calculate_path_and_filename(
-        remote_path remote_filename ${ARTIFACT_GROUP} ${ARTIFACT_NAME} ${ARTIFACT_VERSION} "*" "*" TRUE
-    )
+    set(extra_args)
+
+    if(ARTIFACT_PROPERTIES)
+        _artifactory_parse_properties(props_string "${ARTIFACT_PROPERTIES}")
+        foreach(property ${props_string})
+            list(APPEND extra_args --property ${property})
+        endforeach()
+    endif()
 
     get_property(message_printed GLOBAL PROPERTY _artifactory_fetch_message_printed)
     if(NOT message_printed)
@@ -252,143 +256,36 @@ function(artifactory_fetch result_var)
         set_property(GLOBAL PROPERTY _artifactory_fetch_message_printed 1)
     endif()
 
-    # Fetch the artifact with `art`. It's possible to this with Maven...
-    #
-    #    https://maven.apache.org/plugins/maven-dependency-plugin/get-mojo.html
-    #
-    # ...but this only works if you know the structure of the artifact in
-    # advance (as you need to specify all classifiers and extensions up front),
-    # and it always checks the Maven central repository, and it always puts the
-    # results in ~/.m2.
-
-    # Due to CMake's weird escaping rules we can't actually pass this string to
-    # execute_process(), you need to copy and paste it.
-    set(artifactory_command
-        # We pass --split-count=0 to work around https://github.com/JFrogDev/artifactory-cli-go/issues/7
-        "${ARTIFACTORY_CLI} download ${ARTIFACT_REPO}${remote_path}/${remote_filename} \"${extra_args}\" --split-count=0")
-    file(APPEND ${ARTIFACTORY_CACHE_DIR}/artifactory.log "Running ${artifactory_command}\n")
+    set(artifactory_log ${ARTIFACTORY_CACHE_DIR}/artifactory.log)
 
     execute_process(
         COMMAND
-            ${ARTIFACTORY_CLI} download ${ARTIFACT_REPO}${remote_path}/${remote_filename} "${extra_args}" --split-count=0
+            ${CMAKE_SOURCE_DIR}/support/scripts/artifactory-download
+                ${ARTIFACT_REPO}
+                ${ARTIFACT_GROUP}
+                ${ARTIFACT_NAME}
+                ${ARTIFACT_VERSION}
+                ${extra_args}
+                --artifactory-cli=${ARTIFACTORY_CLI}
+                --log=${artifactory_log}
         OUTPUT_VARIABLE
-            download_output
+            download_files
         ERROR_VARIABLE
-            download_output
+            download_error
         RESULT_VARIABLE
             download_result
         WORKING_DIRECTORY
             ${ARTIFACTORY_CACHE_DIR}
     )
 
-    file(APPEND ${ARTIFACTORY_CACHE_DIR}/artifactory.log "Attempt to download ${remote_path}/${remote_filename}")
-    file(APPEND ${ARTIFACTORY_CACHE_DIR}/artifactory.log "${download_output}\n")
+    file(APPEND "${download_output}\n")
 
     if(NOT download_result EQUAL 0)
         message(FATAL_ERROR
-            "Error running Artifactory CLI ${ARTIFACTORY_CLI}: "
-            "${download_result}.\n"
-            "Command was: ${artifactory_command}\n"
-            "Output: ${download_output}.")
+            "${download_error}See ${artifactory_log} for more information.")
     endif()
 
-    # FIXME: what happens if you can't contact the Artifactory server (no network or whatever?)
-
-    # The remote_filename probably contain globs. The -SNAPSHOT versioning
-    # feature is normally used, so if there are multiple matching snapshot
-    # builds for a given artifact, `art` will download all of them.
-    #
-    # It's highly recommended to filter the SNAPSHOT artifacts by source commit
-    # SHA1, and there /should/ be only one build per commit, but we must handle
-    # other cases.
-    #
-    # Each individual Maven artifact can consist of multiple files, too, with
-    # different classifiers and extensions. So here we calculate the remote
-    # filename again, but with classifier set to "" instead of "*". This
-    # produces a filename pattern that will only match the *main* artifact,
-    # which means we will now be counting the number of artifacts fetched,
-    # rather than the number of total files.
-    _artifactory_calculate_path_and_filename(
-        main_remote_path main_remote_filename ${ARTIFACT_GROUP} ${ARTIFACT_NAME} ${ARTIFACT_VERSION} "" "*" TRUE
-    )
-    file(GLOB artifact_main_files ${ARTIFACTORY_CACHE_DIR}/${remote_path}/${main_remote_filename})
-    list(LENGTH artifact_main_files n_artifacts)
-
-    if(n_artifacts EQUAL 0)
-        # No artifacts for you!
-        message(STATUS "    - No prebuilt artifacts found for ${ARTIFACT_NAME}")
-        unset(${result_var})
-    else()
-        # If there are several to choose from, pick the one that is
-        # alphanumerically last, because that will hopefully be the latest
-        # build.
-        list(SORT artifact_main_files)
-        list(GET artifact_main_files -1 latest_artifact_main_file)
-
-        get_filename_component(latest_artifact_main_file_name ${latest_artifact_main_file} NAME)
-
-        # Now everything gets even more complicated.
-        # FIXME: THIS NEEDS EXTENSIVE TESTING! Does it work without -SNAPSHOT?
-        #
-        # We need to extract the actual version number of the latest artifact,
-        # so we can find the other files that make up that artifact.
-        #
-        # First, we calculate how far through the filename the word -SNAPSHOT
-        # occurs (base_filename_length).
-        string(REGEX REPLACE "-SNAPSHOT$" "" version_no_snapshot ${ARTIFACT_VERSION})
-        _artifactory_calculate_path_and_filename(
-            base_path base_filename ${ARTIFACT_GROUP} ${ARTIFACT_NAME} ${version_no_snapshot} "" "" TRUE
-        )
-        string(LENGTH ${base_filename} base_filename_length)
-        #message("base filename is ${base_filename}, length ${base_filename_length}")
-
-        # Now we slice the real filename from that point, and look for the last
-        # occurance of: "-", followed by one more digits, followed by "." or
-        # the end of the string.
-        #
-        # This *should* tell us where the extension starts. The only way it can
-        # break is if the file's extension contains '-1' or something, which
-        # is fairly unlikely (and might also confuse Artifactory).
-        #
-        # A simpler approach would be to get the caller to tell us the expected
-        # extension of the main artifact. Maybe we should do that instead :)
-        string(SUBSTRING ${latest_artifact_main_file_name} ${base_filename_length} -1 latest_artifact_main_file_tail)
-        #message("tail is ${latest_artifact_main_file_tail}")
-        string(REGEX MATCH "(.*-[0-9]+)(\.|$)" snapshot_junk ${latest_artifact_main_file_tail})
-        set(snapshot_version ${CMAKE_MATCH_1})
-
-        #message("Got snapshot version: ${snapshot_version}")
-        string(REGEX REPLACE "-SNAPSHOT$" "${snapshot_version}" latest_artifact_version ${ARTIFACT_VERSION})
-
-        # Now we can calculate a pattern that matches all the files that make
-        # up the latest version of the artifact that we want. If you're still
-        # alive.
-        _artifactory_calculate_path_and_filename(
-            latest_path latest_pattern ${ARTIFACT_GROUP} ${ARTIFACT_NAME} ${latest_artifact_version} "" "" FALSE
-        )
-        # message("Latest pattern: ${latest_pattern}")
-
-        file(GLOB latest_artifact_files ${ARTIFACTORY_CACHE_DIR}/${remote_path}/${latest_pattern}*)
-
-        # It's important to note that artifactory_fetch() and
-        # artifactory_add_artifact() don't *force* the underlying build
-        # rule to use a prebuilt artifact. So the word "suggesting" is used
-        # deliberately here -- at this point, we don't want to imply that the
-        # artifact will actually be used, because we can't know for sure.
-        if(n_artifacts EQUAL 1)
-            message(STATUS "    - Found prebuilt artifact for ${ARTIFACT_NAME}")
-            message(STATUS "      Suggesting: ${latest_artifact_main_file_name}")
-            set(${result_var} ${latest_artifact_files} PARENT_SCOPE)
-        else()
-            # This situation should not occur in theory, but there's no
-            # mechanism to prevent uploading multiple builds of the exact same
-            # source code, and it shouldn't actually cause anything to break.
-            message(STATUS "    - Found ${n_artifacts} prebuilt artifacts for ${ARTIFACT_NAME}")
-            message(STATUS "      Suggesting: ${latest_artifact_main_file_name}")
-            set(${result_var} ${latest_artifact_files} PARENT_SCOPE)
-            #message("Result: ${latest_artifact_files}")
-        endif()
-    endif()
+    set(${result_var} "${download_files}" PARENT_SCOPE)
 endfunction()
 
 # ::
@@ -517,34 +414,6 @@ function(_artifactory_parse_properties result_var properties)
     endforeach()
 
     set(${result_var} ${result} PARENT_SCOPE)
-endfunction()
-
-function(_artifactory_calculate_path_and_filename path_var filename_var group name version classifier extension snapshot_becomes_wildcard)
-    # Filename follows the Maven path format:
-    #   [orgPath]/[module]/[baseRev](-[folderItegRev])/[module]-[baseRev](-[fileItegRev])(-[classifier]).([ext])
-
-    string(REPLACE . / group_path ${group})
-    if(classifier)
-        set(classifier_section -${classifier})
-    else()
-        set(classifier_section)
-    endif()
-
-    if(extension)
-        set(extension_section .${extension})
-    else()
-        set(extension_section)
-    endif()
-
-    set(folder_version ${version})
-    if(snapshot_becomes_wildcard)
-        string(REGEX REPLACE -SNAPSHOT$ -* file_version ${version})
-    else()
-        set(file_version ${version})
-    endif()
-
-    set(${path_var} /${group_path}/${name}/${folder_version} PARENT_SCOPE)
-    set(${filename_var} ${name}-${file_version}${classifier_section}${extension_section} PARENT_SCOPE)
 endfunction()
 
 function(_artifactory_check_version version_string)

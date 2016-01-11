@@ -1,0 +1,336 @@
+#!/usr/bin/python
+
+# Helper tool for downloading artifacts from Artifactory Maven repositories.
+#
+# This is a wrapper for the artifactory-cli tool:
+#   <https://github.com/JFrogDev/artifactory-cli-go>
+#
+# The functionality is comparable to Maven's dependency:get command:
+#
+#    https://maven.apache.org/plugins/maven-dependency-plugin/get-mojo.html
+#
+# That command is less flexible though: it requires you to know the classifiers
+# and extensions of all the artifacts before you try to download them. By
+# constrast, this script only requires you to pass in the artifact coordinates,
+# and it will fetch all of the files that make up that artifact.
+#
+# The Maven dependency:get command also doesn't allow filtering by properties.
+
+
+import argparse
+import glob
+import logging
+import os
+import posixpath
+import subprocess
+import sys
+import xml.etree.ElementTree as xml
+
+
+class MavenPOMReader(object):
+    '''Read a Maven-compatible POM file that describes an artifact.'''
+
+    namespace = 'http://maven.apache.org/POM/4.0.0'
+    schema_url = 'http://maven.apache.org/xsd/maven-4.0.0.xsd'
+
+    def __init__(self, filename):
+        '''Parse 'filename' as a Maven POM.'''
+        try:
+            self.pom = xml.parse(filename)
+        except Exception as e:
+            raise RuntimeError("Error while loading Maven POM %s: %s" %
+                               (self.pom, e))
+        self.filename = filename
+
+        self.project_element = self.pom.getroot()
+
+        project_tag = '{%s}project' % self.namespace
+        if not self.project_element.tag == project_tag:
+            raise RuntimeError(
+                "Invalid Maven POM %s: root element is %s, expected %s" %
+                (self.filename, self.project_element.tag, project_tag))
+
+    def project_property(self, element_name):
+        '''Get an element from within the <project> block.'''
+        namespaced_element_name = '{%s}%s' % (self.namespace, element_name)
+        elements = self.project_element.findall(namespaced_element_name)
+        if elements is None or len(elements) == 0:
+            raise RuntimeError(
+                "Maven POM %s doesn't contain element '%s'." %
+                (self.filename, namespaced_element_name))
+        if len(elements) > 1:
+            raise RuntimeError(
+                "Maven POM %s has multiple values of element '%s': %s" %
+                (self.filename, namespaced_element_name))
+        return elements[0].text
+
+    def artifact_version(self):
+        '''Return the version of the artifact that this POM represents.'''
+        return  self.project_property('version')
+
+    def main_artifact_filename(self):
+        '''Return the filename of the main artifact file.'''
+        artifact_id = self.project_property('artifactId')
+        version = self.artifact_version()
+        packaging = self.project_property('packaging')
+        return '%s-%s.%s' % (artifact_id, version, packaging)
+
+
+class KeyValueAction(argparse.Action):
+    '''Parses option strings that take key=value arguments.'''
+    def __call__(self, parser, namespace, values, option_string=None):
+        if '=' not in values:
+            raise ValueError("Expected 'key=value' string for %s option" %
+                             option_string)
+        key, value = values.split('=', 1)
+        store = getattr(namespace, self.dest) or {}
+        store[key] = value
+        setattr(namespace, self.dest, store)
+
+
+def argument_parser():
+    parser = argparse.ArgumentParser(
+        description='Download artifacts from a JFrog Artifactory server.')
+
+    parser.add_argument('repo', type=str)
+    parser.add_argument('group_id', type=str)
+    parser.add_argument('artifact_id', type=str)
+    parser.add_argument('version', type=str)
+
+    parser.add_argument('--artifactory-cli', metavar='PATH', type=str,
+                        default='art',
+                        help='Locate the `art` commandline tool, if it is '
+                             'not in PATH')
+
+    parser.add_argument('--log', metavar='FILE', type=str,
+                        help='Append logging output to FILE')
+
+    parser.add_argument('--property', metavar='PROPERTY=VALUE',
+                        dest='properties', action=KeyValueAction,
+                        help='Sets a property on the artifact.')
+
+    return parser
+
+
+# Functions for working with the Maven path format:
+#   [orgPath]/[module]/[baseRev](-[folderItegRev])/[module]-[baseRev](-[fileItegRev])(-[classifier]).([ext])
+#
+# This is described here:
+#    <https://www.jfrog.com/confluence/display/RTF/Repository+Layouts>
+
+def artifact_path(group_id, artifact_id, folder_version):
+    '''Returns the directory containing an artifact, given its coordinates.'''
+    group_id_as_path = group_id.replace('.', '/')
+    parts = ['/', group_id_as_path, artifact_id, folder_version]
+    return posixpath.join(*parts)
+
+
+def artifact_pom_filename(artifact_id, file_version):
+    '''Returns the filename of the POM for a given version of an artifact.'''
+    return '%s-%s.pom' % (artifact_id, file_version)
+
+
+def artifact_all_files_pattern(artifact_id, file_version):
+    '''Returns a glob matching all files that make up a given artifact.'''
+    return '%s-%s*' % (artifact_id, file_version)
+
+
+def get_version_from_pom(artifact_id, pom_filename):
+    '''Given a POM file, find version string of the artifact it describes.'''
+
+    # We could open the POM file and parse it to get the version number, but
+    # we can also just work it out from the filename. We can assume the POM
+    # and filename agree, because Artifactory checks the POM when it is
+    # uploaded.
+    version_start = len(artifact_id) + 1
+    return pom_filename[version_start:-len('.pom')]
+
+
+def download(repo, path, pattern, artifactory_cli='art', properties={}):
+    '''Calls artifactory-cli to download all files matching 'pattern'.'''
+
+    props_arg = []
+    if properties:
+        props = ('%s=%s' % (key, value) for key, value in properties.items())
+        props_arg = ['--props=%s' % ';'.join(props)]
+
+    # We pass --split-count=0 to work around
+    # https://github.com/JFrogDev/artifactory-cli-go/issues/7
+    command = [artifactory_cli, 'download', '--split-count=0'] + props_arg + [
+               repo + path + '/' + pattern]
+    logging.debug(' '.join(command))
+
+    try:
+        p = subprocess.Popen(command, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT)
+        response, _ = p.communicate()
+        logging.debug(response)
+        if p.returncode != 0:
+            raise RuntimeError('%s: %s' % (artifactory_cli, response.strip()))
+    except OSError as e:
+        raise RuntimeError(
+            "Error calling `%s`: %s" % (artifactory_cli, e))
+
+
+def download_pom_files(repo, remote_path, pattern, version,
+                       artifactory_cli='art', properties={}):
+    '''Download all POM files matching 'pattern'.
+
+    Returns the list of POM files that were downloaded.
+
+    '''
+    remote_filename_pattern = artifact_pom_filename(pattern, version)
+    download(repo, remote_path, remote_filename_pattern,
+             artifactory_cli=artifactory_cli, properties=properties)
+
+    # We strip off the initial / from the pathname, so that os.path.abspath()
+    # treats it as a path relative to the current working directory.
+    local_path = os.path.abspath(remote_path[1:])
+
+    local_filename_pattern = remote_filename_pattern
+    pom_files = glob.glob(os.path.join(local_path, local_filename_pattern))
+
+    logging.debug("Globbing for %s in %s: got %s", local_filename_pattern,
+                  local_path, pom_files)
+
+    return pom_files
+
+
+def download_complete_artifact(repo, remote_path, artifact_id, version,
+                               artifactory_cli='art', properties={}):
+    '''Download all files that make up the given artifact.
+
+    Returns the list of files that were downloaded.
+
+    '''
+    remote_filename_pattern = artifact_all_files_pattern(artifact_id, version)
+    download(repo, remote_path, remote_filename_pattern,
+             artifactory_cli=artifactory_cli, properties=properties)
+
+    # We strip off the initial / from the pathname, so that os.path.abspath()
+    # treats it as a path relative to the current working directory.
+    local_path = os.path.abspath(remote_path[1:])
+
+    local_filename_pattern = remote_filename_pattern
+    artifact_files = glob.glob(os.path.join(local_path,
+                                            local_filename_pattern))
+    return artifact_files
+
+
+def find_file_by_basename(path_list, filename):
+    results = [p for p in path_list
+               if os.path.basename(p) == filename]
+    if len(results) == 0:
+        return None
+    else:
+        return results[0]
+
+
+def fetch_newest_matching_artifact(repo, group_id, artifact_id, version,
+                                   artifactory_cli='art', properties={}):
+    '''Fetch the newest version of the specified artifact from Artifactory.
+
+    The 'version' string can contain * wildcards, allowing you to match the
+    latest of a series of snapshot versions. If the version string ends with
+    -SNAPSHOT it will be changed to end with -*.
+
+    This procedure works by first downloading all POM files that match the
+    given version number, then sorting them alphanumerically in order to
+    find the one with the latest timestamp, and then selecting one artifact
+    to download based on the <version> element in the latest POM file.
+
+    The 'properties' dictionary can be used to only download artifacts which
+    have specific values for certain properties. Be aware that any artifact
+    with *no* value for a property will treated as *matching* the filter.
+
+    Returns the list of files that make up the artifact that was downloaded.
+
+    '''
+    logging.info("Looking for newest artifact matching %s %s %s %s" % (
+        repo, group_id, artifact_id, version))
+    remote_path = artifact_path(group_id, artifact_id, version)
+
+    # The artifactory-cli tool downloads to the current working directory,
+    # with the same directory structure as the remote Artifactory repo (we
+    # could disable that with --flat).
+    local_path = os.path.abspath(remote_path)
+
+    if version.endswith('-SNAPSHOT'):
+        logging.info("SNAPSHOT version requested. Downloading all matching "
+                     ".pom files")
+        versions_pattern = version[:-9] + '-*'
+    else:
+        versions_pattern = version
+
+    # We can't get a list of available artifacts without downloading things
+    # (not with the current implementation of the artifactory-cli, anyway).
+    # But we can just download all of the .pom files, which should be quick
+    # enough as they are small files containing only metadata.
+    pom_files = download_pom_files(
+        repo, remote_path, artifact_id, versions_pattern,
+        artifactory_cli=artifactory_cli, properties=properties)
+
+    if len(pom_files) == 0:
+        logging.info('No matching artifacts found.')
+        artifact_files = []
+    else:
+        # Sort the filenames alphanumerically, so that the first item is the
+        # one with the newest timestamp.
+        latest_pom_filename = list(sorted(pom_files, reverse=True))[0]
+        pom = MavenPOMReader(latest_pom_filename)
+
+        matching_version = pom.artifact_version()
+
+        logging.info('Using version: %s' % matching_version)
+
+        artifact_files = download_complete_artifact(
+            repo, remote_path, artifact_id, matching_version,
+            artifactory_cli=artifactory_cli, properties=properties)
+
+        if len(artifact_files) == 0:
+            logging.warn(
+                "Did not find the artifact files for POM %s. Either the POM's "
+                "version field (value '%s') is incorrect, or the files are "
+                "missing on Artifactory." % (latest_pom_filename,
+                                             matching_version))
+            return []
+
+        main_artifact_filename = pom.main_artifact_filename()
+        main_artifact_path = find_file_by_basename(artifact_files,
+                                                   main_artifact_filename)
+        if main_artifact_path:
+            # Make sure the main artifact is first in the list, to make it easy
+            # for the caller to identify that one.
+            artifact_files.remove(main_artifact_path)
+            artifact_files = [main_artifact_path] + artifact_files
+        else:
+            raise RuntimeError(
+                "Expected to find main artifact %s in the list of files, but "
+                "did not! Artifact files are: %s" % (main_artifact_path,
+                ' '.join(artifact_files)))
+
+    return artifact_files
+
+
+def main():
+    args = argument_parser().parse_args()
+
+    logging.basicConfig(filename=args.log, level=logging.DEBUG,
+                        format="%(asctime)s %(message)s")
+
+    files = fetch_newest_matching_artifact(
+        args.repo, args.group_id, args.artifact_id, args.version,
+        artifactory_cli=args.artifactory_cli,
+        properties=args.properties)
+
+    # Show the file list as a CMake list.
+    output = ';'.join(files)
+    logging.info("Result: %s" % output)
+    print(output)
+
+
+try:
+    main()
+except RuntimeError as e:
+    sys.stderr.write('ERROR: %s\n' % e)
+    sys.exit(1)
