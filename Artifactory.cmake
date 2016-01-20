@@ -1,4 +1,4 @@
-# Artifactory.cmake: CMake Integration with the Artifactory artifact server.
+# Artifactory.cmake: CMake integration with the Artifactory artifact server.
 #
 # Copyright 2016 Raumfeld
 #
@@ -12,6 +12,8 @@
 include("support/cmake/DefaultValue")
 include("support/cmake/EnsureAllArgumentsParsed")
 include("support/cmake/RequireArguments")
+
+include("CMakeParseArguments")
 
 set(ARTIFACTORY_FETCH OFF CACHE BOOL "Whether to try to use prebuilt artifacts from Artifactory")
 set(ARTIFACTORY_SUBMIT OFF CACHE BOOL "Whether to try to submit built artifact to Artifactory")
@@ -233,7 +235,9 @@ function(artifactory_fetch result_var)
         _artifactory_parse_properties(props_string "${ARTIFACT_PROPERTIES}")
         set(extra_args --props=${props_string})
     else()
-        set(extra_args)
+        # We can't set this to an empty string as that expands to "", which is
+        # interpreted as an invalid extra argument by `art`.
+        set(extra_args --props=)
     endif()
 
     _artifactory_calculate_path_and_filename(
