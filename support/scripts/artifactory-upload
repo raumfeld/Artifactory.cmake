@@ -226,7 +226,7 @@ def main():
 
     group_path = args.group_id.replace('.', '/')
     remote_path = '%s/%s/%s/%s/' % (
-        args.repo, group_path, args.artifact_id, args.version)
+        args.repo, group_path, args.artifact_id, args.upload_version)
 
     upload(main_file, remote_path, artifactory_cli=args.artifactory_cli,
            properties=args.properties)
