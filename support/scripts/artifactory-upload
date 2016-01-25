@@ -36,6 +36,8 @@ import xml.etree.ElementTree as xml
 
 
 class MavenPOMWriter(object):
+    '''Write a Maven-compatible POM files that describes an artifact.'''
+
     namespace = 'http://maven.apache.org/POM/4.0.0'
     schema_url = 'http://maven.apache.org/xsd/maven-4.0.0.xsd'
 
@@ -76,6 +78,7 @@ class MavenPOMWriter(object):
         self.project = project
 
     def write(self, stream):
+        '''Write POM XML data to 'stream'.'''
         xml.register_namespace('xsi',  'http://www.w3.org/2001/XMLSchema-instance')
 
         pom = xml.ElementTree(element=self.project)
@@ -178,6 +181,8 @@ def find_main_artifact_file(file_list, artifact_basename):
 
 
 def upload(filename, remote_path, artifactory_cli='art', properties=None):
+    '''Upload a single file to Artifactory using the artifactory-cli.'''
+
     props_arg = []
     if properties:
         props = ('%s=%s' % (key, value) for key, value in properties.items())
