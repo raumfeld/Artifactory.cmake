@@ -35,7 +35,7 @@ import subprocess
 import xml.etree.ElementTree as xml
 
 
-class MavenPOM(object):
+class MavenPOMWriter(object):
     namespace = 'http://maven.apache.org/POM/4.0.0'
     schema_url = 'http://maven.apache.org/xsd/maven-4.0.0.xsd'
 
@@ -243,7 +243,7 @@ def main():
             # actually have any benefit. If you upload the artifact with that
             # POM to Artifactory using `maven deploy:deploy-file` all the
             # properties will not be set at the remote end.
-            pom = MavenPOM(
+            pom = MavenPOMWriter(
                 args.group_id, args.artifact_id, args.version, extension,
                 properties=args.properties)
             with open(pom_file, 'w') as f:
