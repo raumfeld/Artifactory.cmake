@@ -548,8 +548,11 @@ function(_artifactory_calculate_path_and_filename path_var filename_var group na
 endfunction()
 
 function(_artifactory_check_version version_string)
-    # Ensure there are no special characters that would break things
-    set(invalid_chars "*/[]\\")
+    # Ensure there are no special characters that would break things.
+    # * is allowed, and this lets the user share artifacts between different
+    # version numbers. This makes sense if they are also filtering by
+    # properties e.g. by commit SHA1 of the source repo.
+    set(invalid_chars "/[]\\")
 
     if(${version_string} MATCHES "[${invalid_chars}]?")
         message(FATAL_ERROR
