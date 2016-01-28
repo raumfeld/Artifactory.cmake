@@ -29,9 +29,9 @@ if(ARTIFACTORY_FETCH OR ARTIFACTORY_SUBMIT)
     if(NOT ARTIFACTORY_CLI)
         message(FATAL_ERROR
             "Artifactory integration requires the `art` Artifactory "
-            "commandline client. It is available at: "
+            "command-line client. It is available at: "
             "https://github.com/JFrogDev/artifactory-cli-go. If it is "
-            "available but not present in PATH, please use define the "
+            "available but not present in PATH, please define the "
             "ARTIFACTORY_CLI variable to the location of the program.")
     endif()
 
