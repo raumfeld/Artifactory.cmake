@@ -151,12 +151,7 @@ function(artifactory_add_artifact directory)
                 COMMAND cmake -E create_symlink ${file} ${binary_directory}/artifact-prebuilt/${file_name})
         endforeach()
 
-        # It's important to note that artifactory_fetch() and
-        # artifactory_add_artifact() don't *force* the underlying build
-        # rule to use a prebuilt artifact. So the word "suggesting" is used
-        # deliberately here -- at this point, we don't want to imply that the
-        # artifact will actually be used, because we can't know for sure.
-        message(STATUS "    - Found prebuilt artifact for ${ARTIFACT_NAME}")
+        message(STATUS "    - Found prebuilt artifact for ${ARTIFACT_NAME}: ${prebuilt_artifact_files}")
     else()
         message(STATUS "    - No prebuilt artifacts found for ${ARTIFACT_NAME}")
     endif()
