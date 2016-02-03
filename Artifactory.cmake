@@ -151,7 +151,7 @@ function(artifactory_add_artifact directory)
                 COMMAND cmake -E create_symlink ${file} ${binary_directory}/artifact-prebuilt/${file_name})
         endforeach()
 
-        message(STATUS "    - Found prebuilt artifact for ${ARTIFACT_NAME}: ${prebuilt_artifact_files}")
+        message(STATUS "    - Found prebuilt artifact(s) for ${ARTIFACT_NAME}: ${prebuilt_artifact_files}")
     else()
         message(STATUS "    - No prebuilt artifacts found for ${ARTIFACT_NAME}")
     endif()
