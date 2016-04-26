@@ -121,6 +121,7 @@ function(artifactory_add_artifact directory)
     ensure_all_arguments_parsed(artifactory_add_artifact "${ARTIFACT_UNPARSED_ARGUMENTS}")
     require_arguments(artifactory_add_artifact ARTIFACT GROUP NAME REPO VERSION UPLOAD_VERSION DOWNLOAD_VERSION)
     _artifactory_check_version(${ARTIFACT_VERSION})
+    _artifactory_check_upload_version(${ARTIFACT_UPLOAD_VERSION})
 
     set(binary_directory ${CMAKE_CURRENT_BINARY_DIR}/${directory})
 
@@ -358,7 +359,7 @@ function(artifactory_upload name)
 
     ensure_all_arguments_parsed(artifactory_upload "${ARTIFACT_UNPARSED_ARGUMENTS}")
     require_arguments(artifactory_upload ARTIFACT GROUP LOCAL_DIRECTORY LOCAL_TARGET NAME REPO VERSION UPLOAD_VERSION)
-    _artifactory_check_version(${ARTIFACT_VERSION})
+    _artifactory_check_upload_version(${ARTIFACT_VERSION})
 
     set(extra_args)
 
@@ -418,12 +419,38 @@ function(_artifactory_check_version version_string)
     # * is allowed, and this lets the user share artifacts between different
     # version numbers. This makes sense if they are also filtering by
     # properties e.g. by commit SHA1 of the source repo.
-    set(invalid_chars "/[]\\")
+    set(invalid_chars "\]\[/\\")
 
-    if(${version_string} MATCHES "[${invalid_chars}]?")
+    if(${version_string} MATCHES "[${invalid_chars}]")
         message(FATAL_ERROR
             "Version string '${version_string}' contains invalid characters. "
             "The following characters are not allowed in Artifactory version "
             "strings: ${invalid_chars}")
     endif()
+endfunction()
+
+function(_artifactory_check_upload_version version_string)
+    # Ensure the upload version follows the expected form.
+    #
+    # The closest I can find for a spec for this format is here:
+    #
+    #   <https://www.jfrog.com/confluence/display/RTF/Repository+Layouts>
+    #
+    # The version string given here should be 'base revision' then 'file
+    # integration revision', joined with a dash. The crucial thing we are
+    # validating is that the 'base revision' contains no hyphens, and the
+    # the string as a whole contains exactly two hyphens. The
+    # artifactory-download script expects this format and will break in weird
+    # ways if it is not followed.
+
+    if(NOT ${version_string} MATCHES "^[^-]\+-[^-]\+-[^-]\+$")
+        message(FATAL_ERROR
+            "Version string '${version_string}' does not follow the correct "
+            "form. When uploading artifacts you must have a version string "
+            "following the form 'NAME-YYYYMMDD.hhmmss-N', for example "
+            "'master-20160427.075407-1'. There must be no dashes in the base "
+            "version string and exactly 2 dashes in the string as a whole.")
+    endif()
+
+    _artifactory_check_version(${version_string})
 endfunction()
