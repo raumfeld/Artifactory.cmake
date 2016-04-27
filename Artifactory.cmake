@@ -359,7 +359,8 @@ function(artifactory_upload name)
 
     ensure_all_arguments_parsed(artifactory_upload "${ARTIFACT_UNPARSED_ARGUMENTS}")
     require_arguments(artifactory_upload ARTIFACT GROUP LOCAL_DIRECTORY LOCAL_TARGET NAME REPO VERSION UPLOAD_VERSION)
-    _artifactory_check_upload_version(${ARTIFACT_VERSION})
+    _artifactory_check_version(${ARTIFACT_VERSION})
+    _artifactory_check_upload_version(${ARTIFACT_UPLOAD_VERSION})
 
     set(extra_args)
 
