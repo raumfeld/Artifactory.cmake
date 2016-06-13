@@ -24,13 +24,13 @@ set(ARTIFACTORY_CACHE_DIR "${CMAKE_CURRENT_BINARY_DIR}/artifactory" CACHE STRING
 mark_as_advanced(ARTIFACTORY_CACHE_DIR)
 
 if(ARTIFACTORY_FETCH OR ARTIFACTORY_SUBMIT)
-    find_program(ARTIFACTORY_CLI art REQUIRED)
+    find_program(ARTIFACTORY_CLI jfrog REQUIRED)
 
     if(NOT ARTIFACTORY_CLI)
         message(FATAL_ERROR
-            "Artifactory integration requires the `art` Artifactory "
+            "Artifactory integration requires the `jfrog` "
             "command-line client. It is available at: "
-            "https://github.com/JFrogDev/artifactory-cli-go. If it is "
+            "https://www.jfrog.com/getcli/. If `jfrog` is "
             "available but not present in PATH, please define the "
             "ARTIFACTORY_CLI variable to the location of the program.")
     endif()
@@ -68,7 +68,7 @@ endif()
 #
 #   <artifact-id>-<version>[-<classifier>].<extension>
 #
-# If ARTIFACTORY_FETCH is ON, this command will use the `art` tool to check the
+# If ARTIFACTORY_FETCH is ON, this command will use the `jfrog rt` tool to check the
 # configured Artifactory repo for the artifact. If it exists, the files will be
 # copied into the ${CMAKE_CURRENT_BINARY_DIR}/<directory>/artifact-prebuilt/
 # directory, before `add_subdirectory(<directory>)` is called. The target
@@ -84,7 +84,7 @@ endif()
 # been called, a target is created that depends on <target-name>, named
 # `artifactory-upload-<target-name>`. This will upload all files from
 # ${CMAKE_CURRENT_BINARY_DIR}/<directory>/artifact-output/ to the configured
-# Artifactory repo using the `art` tool.
+# Artifactory repo using the `jfrog rt` tool.
 #
 # If <version> ends with the string -SNAPSHOT, that is replaced with -* when
 # looking for artifacts to fetch. The artifacts fetched into the
@@ -315,8 +315,8 @@ endfunction()
 # Maven artifact path rules, then Artifactory will replace -SNAPSHOT with the
 # a unique timestamp & build number string in the remote filename.
 #
-# It assumes that the `art` commandline tool has been configured with the
-# correct credentials using the `art config` command.
+# It assumes that the `jfrog rt` commandline tool has been configured with the
+# correct credentials using the `jfrog rt config` command.
 #
 # Rather than taking the filenames of the artifact's files to upload, it takes
 # the name of the directory that should contain the artifact files once
